@@ -1,6 +1,7 @@
 library photo_clean_core;
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
 import 'package:image/image.dart' as img;
@@ -166,6 +167,57 @@ List<List<int>> clusterByPhash(List<BigInt> hashes, {int threshold = 10}) {
   return result;
 }
 
+/// Compute similarity percent (0.0 - 100.0) between two 64-bit phashes.
+/// Convenience wrapper around `hamming64`.
+double similarityPercentFromHashes(BigInt a, BigInt b) {
+  final hd = hamming64(a, b);
+  return ((64 - hd) / 64.0) * 100.0;
+}
+
+/// Compute pHash for raw image bytes. Returns `BigInt.zero` if decoding fails.
+BigInt pHash64FromBytes(Uint8List bytes, {int size = 32, int dctSize = 8}) {
+  final image = img.decodeImage(bytes);
+  if (image == null) return BigInt.zero;
+  return pHash64(image, size: size, dctSize: dctSize);
+}
+
+/// Compute Laplacian variance for raw image bytes. Returns 0.0 on decode failure.
+double laplacianVarianceFromBytes(Uint8List bytes) {
+  final image = img.decodeImage(bytes);
+  if (image == null) return 0.0;
+  return laplacianVariance(image);
+}
+
+/// Compute similarity percent directly from two byte buffers (images).
+/// Returns 0.0 if either image cannot be decoded.
+double similarityPercentFromBytes(Uint8List a, Uint8List b,
+    {int size = 32, int dctSize = 8}) {
+  final ia = img.decodeImage(a);
+  final ib = img.decodeImage(b);
+  if (ia == null || ib == null) return 0.0;
+  final ha = pHash64(ia, size: size, dctSize: dctSize);
+  final hb = pHash64(ib, size: size, dctSize: dctSize);
+  return similarityPercentFromHashes(ha, hb);
+}
+
+/// Convenience boolean check: is this image blurry under [threshold]?
+/// Returns `true` if variance < threshold (i.e. potentially blurry).
+bool isBlurryFromBytes(Uint8List bytes, double threshold) {
+  final v = laplacianVarianceFromBytes(bytes);
+  return v < threshold;
+}
+
+/// Same helpers but accepting decoded `img.Image` directly.
+double similarityPercentFromImage(img.Image a, img.Image b) {
+  final ha = pHash64(a);
+  final hb = pHash64(b);
+  return similarityPercentFromHashes(ha, hb);
+}
+
+double laplacianVarianceFromImage(img.Image image) => laplacianVariance(image);
+
+bool isBlurryFromImage(img.Image image, double threshold) => laplacianVariance(image) < threshold;
+
 double _luminance(img.Image image, int x, int y) {
   final pixel = image.getPixel(x, y);
   return pixel.luminance.toDouble();
@@ -227,4 +279,9 @@ double _median(List<double> values) {
     return sorted[mid];
   }
   return (sorted[mid - 1] + sorted[mid]) / 2.0;
+}
+
+String phashHex(BigInt v) {
+  final hex = v.toUnsigned(64).toRadixString(16).padLeft(16, '0');
+  return '0x$hex';
 }
