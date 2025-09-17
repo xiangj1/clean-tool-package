@@ -1,0 +1,17 @@
+name: photo_clean_workspace
+description: Workspace entrypoint for Photo Clean packages.
+publish_to: none
+version: 0.1.0
+environment:
+  sdk: '>=3.5.0 <4.0.0'
+workspace:
+  - packages/photo_clean_core
+  - packages/photo_clean_cli
+dependencies:
+  photo_clean_core:
+    path: packages/photo_clean_core
+  photo_clean_cli:
+    path: packages/photo_clean_cli
+dev_dependencies:
+  test: ^1.24.0
+  image: ^4.2.0
