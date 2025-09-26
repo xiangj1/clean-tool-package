@@ -2,9 +2,11 @@ library photo_clean_core;
 
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:convert';
 
 import 'package:collection/collection.dart';
 import 'package:image/image.dart' as img;
+import 'package:pointycastle/export.dart' as pc;
 
 /// Generate a 64-bit perceptual hash for the provided [img.Image].
 ///
@@ -284,4 +286,265 @@ double _median(List<double> values) {
 String phashHex(BigInt v) {
   final hex = v.toUnsigned(64).toRadixString(16).padLeft(16, '0');
   return '0x$hex';
+}
+
+// ----------------------------
+// Image Compression Utilities
+// ----------------------------
+
+/// Target output format for compression.
+enum ImageOutputFormat { jpeg, png, auto }
+
+/// Options controlling image compression.
+class ImageCompressionOptions {
+  final int? maxWidth;
+  final int? maxHeight;
+  final int quality; // 1-100 for lossy formats (jpeg/webp)
+  final ImageOutputFormat format;
+  final bool allowLarger; // If true, keep compressed output even if larger.
+
+  const ImageCompressionOptions({
+    this.maxWidth,
+    this.maxHeight,
+    this.quality = 85,
+    this.format = ImageOutputFormat.auto,
+    this.allowLarger = false,
+  })  : assert(quality >= 1 && quality <= 100, 'quality must be 1..100');
+
+  ImageCompressionOptions copyWith({
+    int? maxWidth,
+    int? maxHeight,
+    int? quality,
+    ImageOutputFormat? format,
+    bool? allowLarger,
+  }) => ImageCompressionOptions(
+        maxWidth: maxWidth ?? this.maxWidth,
+        maxHeight: maxHeight ?? this.maxHeight,
+        quality: quality ?? this.quality,
+        format: format ?? this.format,
+        allowLarger: allowLarger ?? this.allowLarger,
+      );
+}
+
+/// Result information of a compression attempt.
+class ImageCompressionResult {
+  final Uint8List originalBytes;
+  final Uint8List outputBytes;
+  final int originalWidth;
+  final int originalHeight;
+  final int outputWidth;
+  final int outputHeight;
+  final ImageOutputFormat chosenFormat;
+  final bool changedDimensions;
+  final bool reEncoded;
+
+  const ImageCompressionResult({
+    required this.originalBytes,
+    required this.outputBytes,
+    required this.originalWidth,
+    required this.originalHeight,
+    required this.outputWidth,
+    required this.outputHeight,
+    required this.chosenFormat,
+    required this.changedDimensions,
+    required this.reEncoded,
+  });
+
+  int get originalSize => originalBytes.length;
+  int get outputSize => outputBytes.length;
+  double get sizeRatio => outputSize / (originalSize == 0 ? 1 : originalSize);
+  double get savingPercent => (1 - sizeRatio) * 100;
+  bool get smaller => outputSize < originalSize;
+}
+
+/// Compress image bytes according to [options].
+///
+/// - Resizes (preserving aspect ratio) if larger than `maxWidth`/`maxHeight`.
+/// - Re-encodes using selected format (or tries multiple when `auto`).
+/// - Returns original bytes if compression does not reduce size (unless
+///   `allowLarger` is true and dimensions changed).
+ImageCompressionResult compressImageBytes(Uint8List input, ImageCompressionOptions options) {
+  final decoded = img.decodeImage(input);
+  if (decoded == null) {
+    return ImageCompressionResult(
+      originalBytes: input,
+      outputBytes: input,
+      originalWidth: 0,
+      originalHeight: 0,
+      outputWidth: 0,
+      outputHeight: 0,
+      chosenFormat: options.format,
+      changedDimensions: false,
+      reEncoded: false,
+    );
+  }
+
+  final originalWidth = decoded.width;
+  final originalHeight = decoded.height;
+
+  img.Image working = decoded;
+  bool resized = false;
+  if (options.maxWidth != null || options.maxHeight != null) {
+    final maxW = options.maxWidth ?? originalWidth;
+    final maxH = options.maxHeight ?? originalHeight;
+    if (originalWidth > maxW || originalHeight > maxH) {
+      // Compute scale preserving aspect.
+      final scaleW = maxW / originalWidth;
+      final scaleH = maxH / originalHeight;
+      final scale = math.min(scaleW, scaleH);
+      final newW = (originalWidth * scale).round().clamp(1, maxW);
+      final newH = (originalHeight * scale).round().clamp(1, maxH);
+      working = img.copyResize(working, width: newW, height: newH, interpolation: img.Interpolation.linear);
+      resized = true;
+    }
+  }
+
+  Uint8List encode(ImageOutputFormat f) {
+    switch (f) {
+      case ImageOutputFormat.jpeg:
+        return Uint8List.fromList(img.encodeJpg(working, quality: options.quality));
+      case ImageOutputFormat.png:
+        return Uint8List.fromList(img.encodePng(working));
+      case ImageOutputFormat.auto:
+        throw StateError('auto should be handled outside encode');
+    }
+  }
+
+  late Uint8List bestBytes;
+  late ImageOutputFormat chosen;
+  if (options.format == ImageOutputFormat.auto) {
+    final candidates = <MapEntry<ImageOutputFormat, Uint8List>>[];
+    for (final f in [ImageOutputFormat.jpeg, ImageOutputFormat.png]) {
+      try {
+        candidates.add(MapEntry(f, encode(f)));
+      } catch (_) {}
+    }
+    if (candidates.isEmpty) {
+      // Fallback to original.
+      return ImageCompressionResult(
+        originalBytes: input,
+        outputBytes: input,
+        originalWidth: originalWidth,
+        originalHeight: originalHeight,
+        outputWidth: originalWidth,
+        outputHeight: originalHeight,
+        chosenFormat: ImageOutputFormat.auto,
+        changedDimensions: false,
+        reEncoded: false,
+      );
+    }
+    candidates.sort((a, b) => a.value.length.compareTo(b.value.length));
+    bestBytes = candidates.first.value;
+    chosen = candidates.first.key;
+  } else {
+    bestBytes = encode(options.format);
+    chosen = options.format;
+  }
+
+  // Decide whether to keep original if no improvement and not resized.
+  final improved = bestBytes.length < input.length;
+  if (!improved && !resized && !options.allowLarger) {
+    return ImageCompressionResult(
+      originalBytes: input,
+      outputBytes: input,
+      originalWidth: originalWidth,
+      originalHeight: originalHeight,
+      outputWidth: originalWidth,
+      outputHeight: originalHeight,
+      chosenFormat: chosen,
+      changedDimensions: false,
+      reEncoded: false,
+    );
+  }
+
+  return ImageCompressionResult(
+    originalBytes: input,
+    outputBytes: bestBytes,
+    originalWidth: originalWidth,
+    originalHeight: originalHeight,
+    outputWidth: working.width,
+    outputHeight: working.height,
+    chosenFormat: chosen,
+    changedDimensions: resized,
+    reEncoded: true,
+  );
+}
+
+// ----------------------------
+// Image Bytes Encryption (AES-GCM)
+// ----------------------------
+
+/// Encrypt raw image (or any) bytes with AES-GCM returning a Base64 JSON string.
+/// The JSON structure: {"alg":"AES-GCM","kdf":"scrypt","salt":"...","iv":"...","cipher":"...","tag":"..."}
+/// Key derivation: scrypt(passphrase, salt, N=16384,r=8,p=1) -> 32 bytes.
+String encryptBytesToBase64Envelope(Uint8List data, String passphrase) {
+  final salt = _secureRandom(16);
+  final iv = _secureRandom(12); // GCM standard 96-bit IV
+  final key = _deriveKey(passphrase, salt);
+
+  final cipher = pc.GCMBlockCipher(pc.AESEngine())
+    ..init(
+      true,
+      pc.AEADParameters(pc.KeyParameter(key), 128, iv, Uint8List(0)),
+    );
+  final cipherText = cipher.process(data);
+  // In pointycastle GCM output = cipher || tag (tag length 16 bytes at end)
+  final tag = cipherText.sublist(cipherText.length - 16);
+  final body = cipherText.sublist(0, cipherText.length - 16);
+  final envelope = {
+    'alg': 'AES-GCM',
+    'kdf': 'scrypt',
+    'salt': base64Encode(salt),
+    'iv': base64Encode(iv),
+    'cipher': base64Encode(body),
+    'tag': base64Encode(tag),
+    'v': 1,
+  };
+  return base64Encode(utf8.encode(jsonEncode(envelope)));
+}
+
+/// Decrypt previously encrypted envelope produced by [encryptBytesToBase64Envelope].
+Uint8List decryptBytesFromBase64Envelope(String b64, String passphrase) {
+  late Map<String, dynamic> env;
+  try {
+    final jsonStr = utf8.decode(base64Decode(b64));
+    env = jsonDecode(jsonStr) as Map<String, dynamic>;
+  } catch (e) {
+    throw FormatException('Invalid envelope base64/json: $e');
+  }
+  if (env['alg'] != 'AES-GCM' || env['kdf'] != 'scrypt') {
+    throw UnsupportedError('Unsupported alg/kdf');
+  }
+  final salt = base64Decode(env['salt'] as String);
+  final iv = base64Decode(env['iv'] as String);
+  final cipherBody = base64Decode(env['cipher'] as String);
+  final tag = base64Decode(env['tag'] as String);
+  final key = _deriveKey(passphrase, salt);
+  final cipher = pc.GCMBlockCipher(pc.AESEngine())
+    ..init(
+      false,
+      pc.AEADParameters(pc.KeyParameter(key), 128, iv, Uint8List(0)),
+    );
+  final full = Uint8List(cipherBody.length + tag.length)
+    ..setRange(0, cipherBody.length, cipherBody)
+    ..setRange(cipherBody.length, cipherBody.length + tag.length, tag);
+  try {
+    return cipher.process(full);
+  } catch (e) {
+    throw StateError('Authentication failed: wrong password or corrupted data ($e)');
+  }
+}
+
+Uint8List _deriveKey(String pass, Uint8List salt) {
+  // Simple scrypt parameters.
+  final params = pc.ScryptParameters(16384, 8, 1, 32, salt);
+  final kdf = pc.Scrypt()..init(params);
+  return kdf.process(Uint8List.fromList(utf8.encode(pass)));
+}
+
+Uint8List _secureRandom(int length) {
+  final rnd = pc.FortunaRandom();
+  final seed = pc.KeyParameter(Uint8List.fromList(List<int>.generate(32, (i) => math.Random.secure().nextInt(256))));
+  rnd.seed(seed);
+  return rnd.nextBytes(length);
 }

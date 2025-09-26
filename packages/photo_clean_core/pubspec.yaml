@@ -8,5 +8,6 @@ environment:
 dependencies:
   image: ^4.2.0
   collection: ^1.18.0
+  pointycastle: ^3.7.3
 dev_dependencies:
   test: ^1.24.0
