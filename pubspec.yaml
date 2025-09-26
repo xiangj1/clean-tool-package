@@ -1,17 +1,10 @@
-name: photo_clean_workspace
-description: Workspace entrypoint for Photo Clean packages.
-publish_to: none
+name: photo_clean_core
+description: "Minimal core: perceptual hash + blur + streaming duplicate detection."
 version: 0.1.0
+repository: https://github.com/xiangj1/clean-tool-package
 environment:
   sdk: '>=3.5.0 <4.0.0'
-workspace:
-  - packages/photo_clean_core
-  - packages/photo_clean_cli
 dependencies:
-  photo_clean_core:
-    path: packages/photo_clean_core
-  photo_clean_cli:
-    path: packages/photo_clean_cli
+  image: ^4.2.0
 dev_dependencies:
   test: ^1.24.0
-  image: ^4.2.0

@@ -1,123 +1,168 @@
-# Photo Clean Monorepo
+# photo_clean_core
 
-Photo Clean 是一个包含核心图像相似度/质量检测、媒体压缩与图片加密功能的 Dart monorepo，帮助你：
-1. 检测相似或模糊图片
-2. 压缩图片与视频减小体积
-3. 对图片（任意二进制文件亦可）进行加密/解密（AES-GCM + scrypt）
+极简纯 Dart 图像相似度 / 清晰度 / 重复聚类 核心库。
 
-## Packages
+> 该仓库已扁平化；历史中的 CLI、压缩、加密、目录 JSON 输出、辅助脚本等均已移除，只保留最小必要算法与流式事件接口。
 
-- **photo_clean_core**：纯 Dart 库，封装 pHash、Laplacian 方差、聚类、图片压缩与 AES-GCM 加密工具。
-- **photo_clean_cli**：命令行工具，基于 `photo_clean_core`，提供相似/模糊分析、媒体压缩与图片加解密子命令。
+## 功能概览
+| 功能 | API | 说明 |
+| ---- | ---- | ---- |
+| 感知哈希 | `pHash64(image)` | 32→8 DCT 取前 8×8 系数 → 64bit hash |
+| 汉明距离 | `hamming64(a,b)` | 计算两个 64bit 哈希差异位数 |
+| 清晰度(模糊度) | `laplacianVariance(image)` | 3×3 Laplacian 响应方差（大=清晰）|
+| 相似聚类 | `clusterByPhash(hashes, threshold:10)` | O(n²) union-find；阈值内合并 |
+| 流式分析 | `analyzeInMemoryStreaming(entries, ...)` | 边解码边发事件；可增量聚类 |
 
-## 快速开始
+事件类型：
+- `ImageAnalyzedEvent`：单张图片完成（含 hash / blurVariance / isBlurry）
+- `ClustersUpdatedEvent`：每隔 `regroupEvery` 或结束输出相似分组
 
-1. 安装 Dart SDK (>= 3.5.0)。
-2. 在仓库根目录执行依赖安装：
-   ```bash
-   dart pub get
-   ```
-3. 运行测试：
-   ```bash
-   dart test
-   ```
-4. 执行命令行工具（自动代理到 `packages/photo_clean_cli`）：
-   ```bash
-   # 分析相似/模糊图片（旧用法兼容）
-   dart run bin/photo_clean_cli.dart <images_folder> [phash_threshold=10] [blur_threshold=250]
+## 安装
+在你的 `pubspec.yaml`：
+```yaml
+dependencies:
+  photo_clean_core:
+    git: https://github.com/xiangj1/clean-tool-package.git
+```
+然后：
+```bash
+dart pub get
+```
 
-   # 使用子命令 analyze（等价）
-   dart run bin/photo_clean_cli.dart analyze <images_folder> [phash_threshold=10] [blur_threshold=250]
+## 快速使用（纯 Dart）
+```dart
+final hash = pHash64(image);                // BigInt 64bit
+final blurVar = laplacianVariance(image);   // double
+final clusters = clusterByPhash([hash1, hash2, hash3], threshold: 8);
+```
 
-   # 新增：压缩图片与视频（需要本地安装 ffmpeg 以处理视频）
-   dart run bin/photo_clean_cli.dart compress <input_path> \
-     --out build/compressed \
-     --quality 82 \
-     --max-width 1920 --max-height 1080 \
-     --format auto \
-     --video-crf 28
-   ```
-
-## Packages 说明
-
-### photo_clean_core
-
-- 目录：`packages/photo_clean_core`
-- 依赖：[`image`](https://pub.dev/packages/image)、[`collection`](https://pub.dev/packages/collection)、[`pointycastle`](https://pub.dev/packages/pointycastle)
-- 核心能力：
-  - `pHash64`：对图片进行缩放、灰度化、DCT-II、基于中位数生成 64bit 感知哈希。
-  - `hamming64`：计算两个 64bit 哈希的汉明距离。
-  - `laplacianVariance`：使用 3x3 Laplacian 核衡量灰度图清晰度。
-   - `clusterByPhash`：按阈值聚类（O(n²)），将相似图片分组。
-   - 图片压缩：`compressImageBytes` + `ImageCompressionOptions`
-   - 图片/任意数据加密：`encryptBytesToBase64Envelope`
-   - 图片/任意数据解密：`decryptBytesFromBase64Envelope`
-- 在该目录执行 `dart test` 可运行核心库的单元测试。
-
-### photo_clean_cli
-
-- 目录：`packages/photo_clean_cli`
-- 依赖：`photo_clean_core`（path 依赖）、`image`、`path`
-- 功能：
-   - `analyze`：遍历指定目录的图片文件（jpg / jpeg / png / bmp），计算 pHash 与 Laplacian 方差，输出相似分组与潜在模糊图片。
-   - `compress`：
-      - 图片：按需缩放、自动或指定格式（auto / jpeg / png），若体积不减且未缩放则保持原文件。
-      - 视频：调用本地 `ffmpeg`，使用 H.264(`libx264`) + CRF；输出 `_compressed.mp4`。
-   - `encrypt` / `decrypt`：对图片（或任何文件）进行 AES-GCM + scrypt 加密/解密，输出单一 Base64 文本信封文件（`.enc.txt`）。
-   - 输出目录通过 `--out` 指定；未指定时就地生成（加密：添加 `.enc.txt`；解密：添加 `.dec` 后缀）。
-- 压缩示例：
-   ```bash
-      dart run bin/photo_clean_cli.dart compress pictures --out build/compressed --quality 80 --max-width 1920 --format auto --video-crf 26
-   ```
-
-### 压缩实现说明
-
-图片压缩基于 `image` 包：
-- 按需缩放（保持纵横比）
-- 自动格式策略会尝试 `jpeg` 与 `png` 取体积更小者（后续可扩展 webp）
-- 若既未缩放也未减小体积，则默认返回原文件（避免质量无意义损失）
-
-视频压缩通过 `ffmpeg`：
-- 需要自行安装：`sudo apt-get install -y ffmpeg` 或访问官网
-- 使用 `libx264 + CRF`，可通过 `--video-crf` 指定（数值越低画质越高，常用 18~30）
-- 输出为 mp4 容器（后缀 `_compressed.mp4`）
-- 在该目录执行 `dart run bin/photo_clean_cli.dart <folder>` 可直接运行。
-
-### 加密 / 解密说明
-
-加密使用：AES-256-GCM + scrypt(KDF 参数 N=16384,r=8,p=1, 输出 32 bytes)。
-
-Envelope 内部 JSON（再整体 Base64）：
-```jsonc
-{
-   "alg": "AES-GCM",
-   "kdf": "scrypt",
-   "salt": "<Base64>",
-   "iv": "<Base64>",
-   "cipher": "<Base64>",
-   "tag": "<Base64>",
-   "v": 1
+## 流式使用（内存图片）
+```dart
+await for (final ev in analyzeInMemoryStreaming(entries,
+    phashThreshold: 8,
+    blurThreshold: 250,
+    regroupEvery: 50)) {
+  if (ev is ImageAnalyzedEvent) {
+    print('hash=${ev.hash.toRadixString(16)} blur=${ev.blurVariance} blurry=${ev.isBlurry}');
+  } else if (ev is ClustersUpdatedEvent) {
+    print('duplicate groups: ${ev.similarGroups.length}');
+  }
 }
 ```
-CLI 仅输出最外层 Base64，方便复制/存储。
 
-示例：
-```bash
-# 加密整个目录
-dart run bin/photo_clean_cli.dart encrypt pictures --password mySecret --out encrypted
+## Flutter 最小示例
+下面演示：
+1. 通过 `image_picker` 选择多张图片
+2. 转成 `InMemoryImageEntry`
+3. 监听流式事件，展示模糊/聚类结果
 
-# 解密
-dart run bin/photo_clean_cli.dart decrypt encrypted --password mySecret --out restored
+```dart
+import 'dart:typed_data';
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:photo_clean_core/photo_clean_core.dart';
+
+class DuplicateScanPage extends StatefulWidget {
+  const DuplicateScanPage({super.key});
+  @override State<DuplicateScanPage> createState() => _DuplicateScanPageState();
+}
+
+class _DuplicateScanPageState extends State<DuplicateScanPage> {
+  final _entries = <InMemoryImageEntry>[];
+  final _duplicates = <List<InMemoryImageEntry>>[];
+  int _processed = 0;
+  int _blurry = 0;
+  bool _running = false;
+
+  Future<void> _pickAndAnalyze() async {
+    final picker = ImagePicker();
+    final files = await picker.pickMultiImage();
+    if (files.isEmpty) return;
+    _entries.clear();
+    for (final f in files) {
+      final bytes = await f.readAsBytes();
+      _entries.add(InMemoryImageEntry(f.name, Uint8List.fromList(bytes)));
+    }
+    setState(() { _running = true; _processed = 0; _blurry = 0; _duplicates.clear(); });
+
+    await for (final ev in analyzeInMemoryStreaming(_entries,
+        phashThreshold: 8, blurThreshold: 250, regroupEvery: 20)) {
+      if (!mounted) break;
+      if (ev is ImageAnalyzedEvent) {
+        _processed++;
+        if (ev.isBlurry) _blurry++;
+      } else if (ev is ClustersUpdatedEvent) {
+        _duplicates
+          ..clear()
+          ..addAll(ev.similarGroups);
+      }
+      setState(() {});
+    }
+    if (mounted) setState(() { _running = false; });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Photo Clean Demo')),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _running ? null : _pickAndAnalyze,
+        child: Icon(_running ? Icons.hourglass_bottom : Icons.photo_library),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Processed: $_processed  Blurry: $_blurry  Groups: ${_duplicates.length}'),
+            const SizedBox(height: 12),
+            Expanded(
+              child: ListView.builder(
+                itemCount: _duplicates.length,
+                itemBuilder: (c, i) {
+                  final g = _duplicates[i];
+                  return ListTile(
+                    title: Text('Group ${i+1} (${g.length} images)'),
+                    subtitle: Text(g.map((e) => e.name).join(', ')),
+                  );
+                },
+              ),
+            )
+          ],
+        ),
+      ),
+    );
+  }
+}
 ```
 
-恢复文件默认加 `.dec` 后缀，若需保留原扩展，可自行重命名或后续扩展 envelope 字段（可加 originalExt）。
+要点：
+- 目前只提供内存级 API，文件扫描/缓存策略由上层自行实现。
+- 大批量 (> 数千) 建议自行分批/隔离 (isolate) 以避免主线程卡顿。
 
-安全提示：
-- 请使用足够复杂的 password；当前未做密码强度校验。
-- scrypt 参数可调整（未来可加入 CLI 参数）。
-- 未做重复加密检测或时间戳，可按需求扩展。
-- 如需合规/高安全场景，请增加完整性外层签名（例如 HMAC 或公私钥签名）。
+## 性能 & 调参建议
+| 场景 | 建议 |
+| ---- | ---- |
+| 图片数量 > 1k | 提高 `regroupEvery`（如 100 或 200）减少频繁聚类事件 |
+| 极大批量 (n>10k) | 先做尺寸/文件大小/扩展名 白名单过滤；再分批调用流式接口 |
+| 避免 UI 卡顿 | 在 Flutter 中使用 `compute` / 自建 isolate 分块计算 pHash + blur |
+| 增量扫描 | 缓存 (path → hash, blurVar)；新文件追加进数组并仅对新增做 pairwise，或用更高级近似结构（未来可选） |
+| 阈值调整 | 一般 5~10 之间，数字越小越“严格” |
 
-## 许可证
+复杂度：当前聚类策略是朴素 O(n²)；对 2~3 千张一般仍可接受（取决于设备），更大规模请自行换用 LSH / BK-tree / 分桶预筛。
 
-本项目使用 [MIT License](LICENSE)。
+## API 行为细节
+- `pHash64`：默认 32→8 DCT；可调 `size` / `dctSize` 但需保持 `dctSize <= size`。
+- `laplacianVariance`：内部自动灰度；过小尺寸 (<3×3) 返回 0。
+- `analyzeInMemoryStreaming`：遇到单图解码异常静默跳过；如需要调试/统计可自行 wrap 增强。
+
+## 开发 / 贡献
+```bash
+dart test
+```
+
+## 版本
+当前 `pubspec.yaml` 版本：0.1.0 （首次极简化版本）。若后续继续产生破坏性改动，建议升级至 0.2.0+ 并维护 CHANGELOG。
+
+## License
+MIT
