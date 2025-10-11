@@ -1,22 +1,14 @@
 # photo_clean_core
 
-极简纯 Dart 图像相似度 / 清晰度 / 重复聚类 核心库。
+极简纯 Dart 批次图像重复 / 相似 / 模糊分类流式核心库（单一公共函数 + 单一事件）。
 
 > 该仓库已扁平化；历史中的 CLI、压缩、加密、目录 JSON 输出、辅助脚本等均已移除，只保留最小必要算法与流式事件接口。
 
-## 功能概览
-| 功能 | API | 说明 |
-| ---- | ---- | ---- |
-| 感知哈希 | `pHash64(image)` | 32→8 DCT 取前 8×8 系数 → 64bit hash |
-| 汉明距离 | `hamming64(a,b)` | 计算两个 64bit 哈希差异位数 |
-| 清晰度(模糊度) | `laplacianVariance(image)` | 3×3 Laplacian 响应方差（大=清晰）|
-| 相似聚类 | `clusterByPhash(hashes, threshold:10)` | O(n²) union-find；阈值内合并 |
-| 流式分析 | `analyzeInMemoryStreaming(entries, ...)` | 边解码边发事件；可增量聚类 |
+## 公共 API（只有一个）
+`analyzeInMemoryStreaming(entries, phashThreshold: 10, blurThreshold: 250, regroupEvery: 50)`
 
-事件类型：
-- `ImageAnalyzedEvent`：单张图片完成（含 hash / blurVariance / isBlurry）
-- `ClustersUpdatedEvent`：每隔 `regroupEvery` 或结束输出相似分组
- - `CleanInfoUpdatedEvent`：每处理一张都会附带当前聚合分类 Map（all / duplicate / similar / blur / screenshot / video / other）
+事件类型只有一种：
+- `CleanInfoUpdatedEvent`：每达到 `regroupEvery` 数量或结束时输出聚合分类 Map（all / duplicate / similar / blur / screenshot / video / other）。
 
 ## 安装
 在你的 `pubspec.yaml`：
@@ -30,24 +22,19 @@ dependencies:
 dart pub get
 ```
 
-## 快速使用（纯 Dart）
-```dart
-final hash = pHash64(image);                // BigInt 64bit
-final blurVar = laplacianVariance(image);   // double
-final clusters = clusterByPhash([hash1, hash2, hash3], threshold: 8);
-```
+## 设计理念
+内部包含感知哈希 / 模糊度 / O(n²) 聚类实现，但它们均为私有；上层只需消费聚合分类事件，避免误用底层算法并方便未来替换实现。
 
 ## 流式使用（内存图片）
+只会在批次（每 `regroupEvery` 张，默认 50）或最后输出一次聚合分类。
 ```dart
 await for (final ev in analyzeInMemoryStreaming(entries,
-    phashThreshold: 8,
-    blurThreshold: 250,
-    regroupEvery: 50)) {
-  if (ev is ImageAnalyzedEvent) {
-    print('hash=${ev.hash.toRadixString(16)} blur=${ev.blurVariance} blurry=${ev.isBlurry}');
-  } else if (ev is ClustersUpdatedEvent) {
-    print('duplicate groups: ${ev.similarGroups.length}');
-  }
+  phashThreshold: 8,
+  blurThreshold: 250,
+  regroupEvery: 50)) {
+  // 仅有这一种事件
+  final info = (ev as CleanInfoUpdatedEvent).cleanInfo;
+  print('processed=${info['all']['count']} duplicate=${info['duplicate']['count']} similar=${info['similar']['count']}');
 }
 ```
 
@@ -55,7 +42,7 @@ await for (final ev in analyzeInMemoryStreaming(entries,
 下面演示：
 1. 通过 `image_picker` 选择多张图片
 2. 转成 `InMemoryImageEntry`
-3. 监听流式事件，展示模糊/聚类结果
+3. 监听批次事件，展示聚合分类
 
 ```dart
 import 'dart:typed_data';
@@ -70,9 +57,7 @@ class DuplicateScanPage extends StatefulWidget {
 
 class _DuplicateScanPageState extends State<DuplicateScanPage> {
   final _entries = <InMemoryImageEntry>[];
-  final _duplicates = <List<InMemoryImageEntry>>[];
-  int _processed = 0;
-  int _blurry = 0;
+  Map<String, dynamic>? _lastInfo;
   bool _running = false;
 
   Future<void> _pickAndAnalyze() async {
@@ -84,19 +69,12 @@ class _DuplicateScanPageState extends State<DuplicateScanPage> {
       final bytes = await f.readAsBytes();
       _entries.add(InMemoryImageEntry(f.name, Uint8List.fromList(bytes)));
     }
-    setState(() { _running = true; _processed = 0; _blurry = 0; _duplicates.clear(); });
+  setState(() { _running = true; _lastInfo = null; });
 
     await for (final ev in analyzeInMemoryStreaming(_entries,
         phashThreshold: 8, blurThreshold: 250, regroupEvery: 20)) {
       if (!mounted) break;
-      if (ev is ImageAnalyzedEvent) {
-        _processed++;
-        if (ev.isBlurry) _blurry++;
-      } else if (ev is ClustersUpdatedEvent) {
-        _duplicates
-          ..clear()
-          ..addAll(ev.similarGroups);
-      }
+      _lastInfo = (ev as CleanInfoUpdatedEvent).cleanInfo;
       setState(() {});
     }
     if (mounted) setState(() { _running = false; });
@@ -115,20 +93,13 @@ class _DuplicateScanPageState extends State<DuplicateScanPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Processed: $_processed  Blurry: $_blurry  Groups: ${_duplicates.length}'),
+            if (_lastInfo != null) ...[
+              Text('Processed: ${_lastInfo!['all']['count']}'),
+              Text('Duplicate: ${_lastInfo!['duplicate']['count']}  Similar: ${_lastInfo!['similar']['count']}  Blur: ${_lastInfo!['blur']['count']}'),
+            ] else const Text('No batch yet'),
             const SizedBox(height: 12),
-            Expanded(
-              child: ListView.builder(
-                itemCount: _duplicates.length,
-                itemBuilder: (c, i) {
-                  final g = _duplicates[i];
-                  return ListTile(
-                    title: Text('Group ${i+1} (${g.length} images)'),
-                    subtitle: Text(g.map((e) => e.name).join(', ')),
-                  );
-                },
-              ),
-            )
+            const SizedBox(height: 12),
+            Expanded(child: Center(child: Text(_running ? 'Analyzing...' : 'Done')))
           ],
         ),
       ),
@@ -153,12 +124,10 @@ class _DuplicateScanPageState extends State<DuplicateScanPage> {
 复杂度：当前聚类策略是朴素 O(n²)；对 2~3 千张一般仍可接受（取决于设备），更大规模请自行换用 LSH / BK-tree / 分桶预筛。
 
 ## API 行为细节
-- `pHash64`：默认 32→8 DCT；可调 `size` / `dctSize` 但需保持 `dctSize <= size`。
-- `laplacianVariance`：内部自动灰度；过小尺寸 (<3×3) 返回 0。
-- `analyzeInMemoryStreaming`：遇到单图解码异常静默跳过；如需要调试/统计可自行 wrap 增强。
+- `analyzeInMemoryStreaming`：遇到单图解码异常静默跳过；如需要调试/统计可自行 wrap 或 fork。
 
 ## CleanInfo 实时分类
-流式分析时除了单张图片的 `ImageAnalyzedEvent`，还会紧跟一个 `CleanInfoUpdatedEvent`，内部 `cleanInfo` 的结构示例：
+每个批次（或结束）会发出一个 `CleanInfoUpdatedEvent`，`cleanInfo` 结构示例：
 ```json
 {
   "all": {"count": 5, "size": 123456, "list": ["a","b","c","d","e"]},
@@ -173,8 +142,9 @@ class _DuplicateScanPageState extends State<DuplicateScanPage> {
 说明：
 - duplicate/similar/blur 是“标签”概念，可重叠；`other` = 未命中前三种的剩余条目。
 - screenshot / video 为未来扩展占位当前恒为空。
-- duplicate 判定：同组内任何 pair 哈希汉明距离=0；similar：距离>0 且 ≤ 阈值；similar 会剔除已归入 duplicate 的名字。
-- 每满 `regroupEvery` 或最终结束时会重新聚类，随后再发一次更精确的 `CleanInfoUpdatedEvent`。
+- duplicate：同组内任意 pair 哈希距离=0
+- similar：距离>0 且 ≤ 阈值（剔除已标记 duplicate 的条目）
+- 每满 `regroupEvery` 或结束时重新聚合与分类
 简单消费方式：
 ```dart
 await for (final ev in analyzeInMemoryStreaming(entries)) {

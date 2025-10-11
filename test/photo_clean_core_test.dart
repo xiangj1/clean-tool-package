@@ -1,39 +1,41 @@
+import 'dart:typed_data';
 import 'package:image/image.dart' as img;
 import 'package:photo_clean_core/photo_clean_core.dart';
 import 'package:test/test.dart';
 
-// Consolidated core tests (previously in shared_tests.dart) so we can
-// keep the test directory minimal.
 void main() {
-	test('pHash64 generates zero hash for a uniform image', () {
-		final image = img.Image(width: 32, height: 32);
-		img.fill(image, color: img.ColorRgb8(255, 255, 255));
+	img.Image pattern(int seed) {
+		final im = img.Image(width: 40, height: 40);
+		for (var y = 0; y < im.height; y++) {
+			for (var x = 0; x < im.width; x++) {
+				final v = (x * seed + y * 3) % 255;
+				im.setPixelRgba(x, y, v, (v * 2) % 255, (v * 3) % 255, 255);
+			}
+		}
+		return im;
+	}
 
-		final hash = pHash64(image);
-		expect(hash.isNegative, isFalse);
-		expect(hash.bitLength, lessThanOrEqualTo(64));
-	});
-
-	test('laplacianVariance captures contrast in an image', () {
-		final image = img.Image(width: 5, height: 5);
-		img.fill(image, color: img.ColorRgb8(0, 0, 0));
-		image.setPixelRgba(2, 2, 255, 255, 255, 255);
-
-		final variance = laplacianVariance(image);
-		expect(variance, greaterThan(0));
-	});
-
-	test('clusterByPhash groups hashes within the threshold', () {
-		final hashes = <BigInt>[
-			BigInt.zero,
-			BigInt.one,
-			BigInt.from(0xff),
+	test('stream final cleanInfo categories contain expected duplicate', () async {
+		final a = pattern(7);
+		final b = img.copyRotate(a, angle: 0); // identical content
+		final c = pattern(11);
+		final entries = [
+			InMemoryImageEntry('a', Uint8List.fromList(img.encodePng(a))),
+			InMemoryImageEntry('b', Uint8List.fromList(img.encodePng(b))),
+			InMemoryImageEntry('c', Uint8List.fromList(img.encodePng(c))),
 		];
 
-		final clusters = clusterByPhash(hashes, threshold: 1);
-		final group = clusters.firstWhere((cluster) => cluster.contains(0));
-
-		expect(group, containsAll(<int>[0, 1]));
-		expect(group.length, 2);
+		CleanInfoUpdatedEvent? last;
+		await for (final ev in analyzeInMemoryStreaming(entries, phashThreshold: 5, regroupEvery: 3)) {
+			last = ev as CleanInfoUpdatedEvent;
+		}
+		expect(last, isNotNull);
+		final info = last!.cleanInfo;
+		expect(info['all']['count'], 3);
+		for (final k in ['duplicate','similar','blur','other','screenshot','video']) {
+			expect(info.containsKey(k), isTrue, reason: 'missing $k');
+		}
+		final dupList = (info['duplicate']['list'] as List).cast<String>();
+		expect(dupList.contains('a') && dupList.contains('b'), isTrue, reason: 'a & b should be duplicate');
 	});
 }
