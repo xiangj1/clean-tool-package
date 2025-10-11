@@ -156,6 +156,32 @@ class _DuplicateScanPageState extends State<DuplicateScanPage> {
 - `laplacianVariance`：内部自动灰度；过小尺寸 (<3×3) 返回 0。
 - `analyzeInMemoryStreaming`：遇到单图解码异常静默跳过；如需要调试/统计可自行 wrap 增强。
 
+## 批处理汇总 (非流式)
+如果你不需要事件，而是“一次性得到分类统计（全部 / duplicate / similar / blur / other）”，可以使用：
+
+```dart
+final summary = await analyzeInMemorySummary(entries,
+  phashThreshold: 8,
+  blurThreshold: 250,
+);
+
+print(summary.all.count);            // 全部有效图片数量
+print(summary.duplicate.count);      // 重复（hash 距离=0）图片数量
+print(summary.similar.count);        // 相似但非完全重复的图片数量
+print(summary.blur.count);           // 模糊图片数量
+print(summary.other.count);          // 未命中上述任一标签的剩余
+
+for (final g in summary.groups) {
+  // 每个 g 是一个相似/重复分组 (size>1)
+  print('group: '+ g.map((e)=>e.entry.name).join(', '));
+}
+```
+
+说明：
+- 分类是“非互斥”的：同一图片既可能在 duplicate 也可能在 blur；`other` 是未出现在任意 duplicate/similar/blur 集合中的条目。
+- `groups` 仅包含 size>1 的聚类结果，用于 UI 展示。
+- 初始版本未包含 screenshot / video 分类（将来可扩展）。
+
 ## 开发 / 贡献
 ```bash
 dart test
