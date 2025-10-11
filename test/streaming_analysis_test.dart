@@ -15,7 +15,7 @@ void main() {
     return im;
   }
 
-  test('streaming analysis emits image and cluster events', () async {
+  test('streaming analysis emits image, cleanInfo and cluster events', () async {
     final a = pattern(5);
     final b = img.copyRotate(a, angle: 0);
     final c = pattern(11);
@@ -32,7 +32,19 @@ void main() {
     }
 
     final clusterEvents = events.whereType<ClustersUpdatedEvent>().toList();
+    final cleanInfoEvents = events.whereType<CleanInfoUpdatedEvent>().toList();
     expect(clusterEvents, isNotEmpty);
+    expect(cleanInfoEvents.length, greaterThanOrEqualTo(entries.length),
+        reason: 'Should emit at least one cleanInfo per processed image');
+
+    // Inspect last cleanInfo snapshot
+    final lastInfo = cleanInfoEvents.last.cleanInfo;
+    expect(lastInfo.containsKey('all'), isTrue);
+    expect(lastInfo['all']['count'], 3);
+    // categories exist
+    for (final k in ['duplicate','similar','blur','other','screenshot','video']) {
+      expect(lastInfo.containsKey(k), isTrue, reason: 'missing category $k');
+    }
     final hasAB = clusterEvents.any((ce) =>
         ce.similarGroups.any((g) => g.any((e) => e.name == 'a') && g.any((e) => e.name == 'b')));
     expect(hasAB, isTrue);

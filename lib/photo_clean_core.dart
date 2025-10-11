@@ -237,6 +237,12 @@ class ClustersUpdatedEvent extends StreamingAnalysisEvent {
   const ClustersUpdatedEvent(this.similarGroups);
 }
 
+// New event: emits current aggregated cleanInfo map after each image analyzed.
+class CleanInfoUpdatedEvent extends StreamingAnalysisEvent {
+  final Map<String, dynamic> cleanInfo;
+  const CleanInfoUpdatedEvent(this.cleanInfo);
+}
+
 Stream<StreamingAnalysisEvent> analyzeInMemoryStreaming(
   List<InMemoryImageEntry> entries, {
   int phashThreshold = 10,
@@ -246,6 +252,79 @@ Stream<StreamingAnalysisEvent> analyzeInMemoryStreaming(
   if (regroupEvery < 1) regroupEvery = 1;
   final hashes = <BigInt>[];
   final validEntries = <InMemoryImageEntry>[];
+  final blurFlags = <bool>[]; // parallel list indicating blurry
+
+  Map<String, dynamic> buildCleanInfo({List<List<InMemoryImageEntry>>? groupsCache}) {
+    // Recompute groups if needed (only when requested after regroup or final)
+    List<List<InMemoryImageEntry>> groups;
+    if (groupsCache != null) {
+      groups = groupsCache;
+    } else {
+      groups = _currentGroups(hashes, validEntries, phashThreshold);
+    }
+
+    // Determine duplicate/similar sets from groups (distance based)
+    final duplicateNames = <String>{};
+    final similarNames = <String>{};
+    for (final g in groups) {
+      // map name->index for hash access
+      final idxList = g.map((e) => validEntries.indexOf(e)).where((i) => i >= 0).toList();
+      for (var i = 0; i < idxList.length; i++) {
+        for (var j = i + 1; j < idxList.length; j++) {
+          final ia = idxList[i];
+            final ib = idxList[j];
+          final dist = hamming64(hashes[ia], hashes[ib]);
+          if (dist == 0) {
+            duplicateNames.add(validEntries[ia].name);
+            duplicateNames.add(validEntries[ib].name);
+          } else if (dist <= phashThreshold) {
+            similarNames.add(validEntries[ia].name);
+            similarNames.add(validEntries[ib].name);
+          }
+        }
+      }
+    }
+    // remove duplicates from similar set
+    similarNames.removeAll(duplicateNames);
+
+    final blurNames = <String>{};
+    for (var i = 0; i < validEntries.length; i++) {
+      if (blurFlags[i]) blurNames.add(validEntries[i].name);
+    }
+
+    final allSize = validEntries.fold<int>(0, (p, e) => p + e.bytes.length);
+
+    Map<String, dynamic> packSet(Set<String> names) {
+      final list = validEntries.where((e) => names.contains(e.name)).toList();
+      final size = list.fold<int>(0, (p, e) => p + e.bytes.length);
+      return {
+        'count': list.length,
+        'size': size,
+        'list': list.map((e) => e.name).toList(),
+      };
+    }
+
+    final duplicateInfo = packSet(duplicateNames);
+    final similarInfo = packSet(similarNames);
+    final blurInfo = packSet(blurNames);
+    final tagged = {...duplicateNames, ...similarNames, ...blurNames};
+    final otherSet = validEntries.where((e) => !tagged.contains(e.name)).map((e) => e.name).toSet();
+    final otherInfo = packSet(otherSet);
+
+    return {
+      'all': {
+        'count': validEntries.length,
+        'size': allSize,
+        'list': validEntries.map((e) => e.name).toList(),
+      },
+      'duplicate': duplicateInfo,
+      'similar': similarInfo,
+      'blur': blurInfo,
+      'screenshot': {'count': 0, 'size': 0, 'list': <String>[]}, // placeholder
+      'video': {'count': 0, 'size': 0, 'list': <String>[]}, // placeholder
+      'other': otherInfo,
+    };
+  }
   for (final e in entries) {
     try {
       final decoded = img.decodeImage(e.bytes);
@@ -260,19 +339,28 @@ Stream<StreamingAnalysisEvent> analyzeInMemoryStreaming(
       final bv = laplacianVariance(normalized);
       hashes.add(h);
       validEntries.add(e);
+      blurFlags.add(bv < blurThreshold);
       yield ImageAnalyzedEvent(
         entry: e,
         hash: h,
         blurVariance: bv,
         isBlurry: bv < blurThreshold,
       );
+      // After each image, emit cleanInfo snapshot (without forcing a fresh groups rebuild unless needed)
+      // We pass null for groupsCache to allow grouping only at regroup steps.
+      yield CleanInfoUpdatedEvent(buildCleanInfo());
       if (validEntries.length % regroupEvery == 0) {
-        yield ClustersUpdatedEvent(_currentGroups(hashes, validEntries, phashThreshold));
+        final groups = _currentGroups(hashes, validEntries, phashThreshold);
+        yield ClustersUpdatedEvent(groups);
+        // emit cleanInfo again to reflect refined duplicate/similar classification with fresh groups
+        yield CleanInfoUpdatedEvent(buildCleanInfo(groupsCache: groups));
       }
     } catch (_) {}
   }
   if (validEntries.isNotEmpty) {
-    yield ClustersUpdatedEvent(_currentGroups(hashes, validEntries, phashThreshold));
+    final groups = _currentGroups(hashes, validEntries, phashThreshold);
+    yield ClustersUpdatedEvent(groups);
+    yield CleanInfoUpdatedEvent(buildCleanInfo(groupsCache: groups));
   }
 }
 
@@ -291,222 +379,3 @@ List<List<InMemoryImageEntry>> _currentGroups(
   return out;
 }
 
-// ------------------------------------------------------------
-// Batch summary API (non-stream) — categories: all / duplicate / similar / blur / other
-// ------------------------------------------------------------
-
-class ImageAnalysisItem {
-  final InMemoryImageEntry entry;
-  final BigInt hash;
-  final double blurVariance;
-  final bool isBlurry;
-  // groupId is optional: assigned after grouping; groups with single element get -1.
-  final int groupId;
-  const ImageAnalysisItem({
-    required this.entry,
-    required this.hash,
-    required this.blurVariance,
-    required this.isBlurry,
-    required this.groupId,
-  });
-}
-
-class CleanCategorySummary {
-  final int count;
-  final int size; // total bytes
-  final List<ImageAnalysisItem> list;
-  const CleanCategorySummary({required this.count, required this.size, required this.list});
-}
-
-class CleanAnalysisSummary {
-  final CleanCategorySummary all;
-  final CleanCategorySummary duplicate;
-  final CleanCategorySummary similar;
-  final CleanCategorySummary blur;
-  final CleanCategorySummary other;
-  // groups: only groups with length > 1 (duplicates and/or similars)
-  final List<List<ImageAnalysisItem>> groups;
-  const CleanAnalysisSummary({
-    required this.all,
-    required this.duplicate,
-    required this.similar,
-    required this.blur,
-    required this.other,
-    required this.groups,
-  });
-
-  Map<String, dynamic> toMap() => {
-        'all': _catMap(all),
-        'duplicate': _catMap(duplicate),
-        'similar': _catMap(similar),
-        'blur': _catMap(blur),
-        'other': _catMap(other),
-        'groups': groups
-            .map((g) => g
-                .map((i) => {
-                      'name': i.entry.name,
-                      'hash': i.hash.toUnsigned(64).toRadixString(16).padLeft(16, '0'),
-                      'blurVar': i.blurVariance,
-                      'isBlurry': i.isBlurry,
-                      'groupId': i.groupId,
-                    })
-                .toList())
-            .toList(),
-      };
-
-  static Map<String, dynamic> _catMap(CleanCategorySummary c) => {
-        'count': c.count,
-        'size': c.size,
-        'list': c.list
-            .map((i) => {
-                  'name': i.entry.name,
-                  'hash': i.hash.toUnsigned(64).toRadixString(16).padLeft(16, '0'),
-                  'blurVar': i.blurVariance,
-                  'isBlurry': i.isBlurry,
-                  'groupId': i.groupId,
-                })
-            .toList(),
-      };
-}
-
-/// Analyze all entries at once and build categorical summary.
-/// Categories are non-exclusive (duplicate/similar/blur can overlap). "other" are those not in any other tag.
-Future<CleanAnalysisSummary> analyzeInMemorySummary(
-  List<InMemoryImageEntry> entries, {
-  int phashThreshold = 10,
-  double blurThreshold = 250.0,
-}) async {
-  if (entries.isEmpty) {
-    return CleanAnalysisSummary(
-      all: const CleanCategorySummary(count: 0, size: 0, list: []),
-      duplicate: const CleanCategorySummary(count: 0, size: 0, list: []),
-      similar: const CleanCategorySummary(count: 0, size: 0, list: []),
-      blur: const CleanCategorySummary(count: 0, size: 0, list: []),
-      other: const CleanCategorySummary(count: 0, size: 0, list: []),
-      groups: const [],
-    );
-  }
-
-  final decodedEntries = <InMemoryImageEntry>[];
-  final hashes = <BigInt>[];
-  final blurVars = <double>[];
-
-  for (final e in entries) {
-    try {
-      final decoded = img.decodeImage(e.bytes);
-      if (decoded == null) continue;
-      final normalized = img.copyResize(
-        decoded,
-        width: 256,
-        height: 256,
-        interpolation: img.Interpolation.linear,
-      );
-      final h = pHash64(normalized);
-      final bv = laplacianVariance(normalized);
-      decodedEntries.add(e);
-      hashes.add(h);
-      blurVars.add(bv);
-    } catch (_) {}
-  }
-
-  // Build items (groupId assigned later)
-  final items = List<ImageAnalysisItem>.generate(decodedEntries.length, (i) {
-    return ImageAnalysisItem(
-      entry: decodedEntries[i],
-      hash: hashes[i],
-      blurVariance: blurVars[i],
-      isBlurry: blurVars[i] < blurThreshold,
-      groupId: -1,
-    );
-  });
-
-  if (items.isEmpty) {
-    return CleanAnalysisSummary(
-      all: const CleanCategorySummary(count: 0, size: 0, list: []),
-      duplicate: const CleanCategorySummary(count: 0, size: 0, list: []),
-      similar: const CleanCategorySummary(count: 0, size: 0, list: []),
-      blur: const CleanCategorySummary(count: 0, size: 0, list: []),
-      other: const CleanCategorySummary(count: 0, size: 0, list: []),
-      groups: const [],
-    );
-  }
-
-  final clusters = clusterByPhash(hashes, threshold: phashThreshold);
-  final groups = <List<ImageAnalysisItem>>[];
-  var nextGroupId = 0;
-
-  // Duplicate & similar index sets
-  final duplicateIdx = <int>{};
-  final similarIdx = <int>{};
-
-  for (final c in clusters) {
-    if (c.length <= 1) continue;
-    // assign group id
-    for (final idx in c) {
-      final old = items[idx];
-      items[idx] = ImageAnalysisItem(
-        entry: old.entry,
-        hash: old.hash,
-        blurVariance: old.blurVariance,
-        isBlurry: old.isBlurry,
-        groupId: nextGroupId,
-      );
-    }
-
-    // pairwise distance classification
-    for (var i = 0; i < c.length; i++) {
-      for (var j = i + 1; j < c.length; j++) {
-        final a = c[i];
-        final b = c[j];
-        final dist = hamming64(hashes[a], hashes[b]);
-        if (dist == 0) {
-          duplicateIdx.add(a);
-          duplicateIdx.add(b);
-        } else if (dist <= phashThreshold) {
-          similarIdx.add(a);
-          similarIdx.add(b);
-        }
-      }
-    }
-
-    groups.add(c.map((i) => items[i]).toList());
-    nextGroupId++;
-  }
-
-  // similar excludes duplicates
-  similarIdx.removeAll(duplicateIdx);
-
-  final blurIdx = <int>{};
-  for (var i = 0; i < items.length; i++) {
-    if (items[i].isBlurry) blurIdx.add(i);
-  }
-
-  CleanCategorySummary buildCat(Set<int> idxSet) {
-    final list = idxSet.map((i) => items[i]).toList();
-    final size = list.fold<int>(0, (p, e) => p + e.entry.bytes.length);
-    return CleanCategorySummary(count: list.length, size: size, list: list);
-  }
-
-  final allSize = items.fold<int>(0, (p, e) => p + e.entry.bytes.length);
-  final allCat = CleanCategorySummary(count: items.length, size: allSize, list: [...items]);
-  final dupCat = buildCat(duplicateIdx);
-  final simCat = buildCat(similarIdx);
-  final blurCat = buildCat(blurIdx);
-
-  // other = items not in any of the above three sets
-  final tagged = {...duplicateIdx, ...similarIdx, ...blurIdx};
-  final otherSet = <int>{};
-  for (var i = 0; i < items.length; i++) {
-    if (!tagged.contains(i)) otherSet.add(i);
-  }
-  final otherCat = buildCat(otherSet);
-
-  return CleanAnalysisSummary(
-    all: allCat,
-    duplicate: dupCat,
-    similar: simCat,
-    blur: blurCat,
-    other: otherCat,
-    groups: groups,
-  );
-}

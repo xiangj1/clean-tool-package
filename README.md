@@ -16,6 +16,7 @@
 事件类型：
 - `ImageAnalyzedEvent`：单张图片完成（含 hash / blurVariance / isBlurry）
 - `ClustersUpdatedEvent`：每隔 `regroupEvery` 或结束输出相似分组
+ - `CleanInfoUpdatedEvent`：每处理一张都会附带当前聚合分类 Map（all / duplicate / similar / blur / screenshot / video / other）
 
 ## 安装
 在你的 `pubspec.yaml`：
@@ -156,31 +157,34 @@ class _DuplicateScanPageState extends State<DuplicateScanPage> {
 - `laplacianVariance`：内部自动灰度；过小尺寸 (<3×3) 返回 0。
 - `analyzeInMemoryStreaming`：遇到单图解码异常静默跳过；如需要调试/统计可自行 wrap 增强。
 
-## 批处理汇总 (非流式)
-如果你不需要事件，而是“一次性得到分类统计（全部 / duplicate / similar / blur / other）”，可以使用：
-
-```dart
-final summary = await analyzeInMemorySummary(entries,
-  phashThreshold: 8,
-  blurThreshold: 250,
-);
-
-print(summary.all.count);            // 全部有效图片数量
-print(summary.duplicate.count);      // 重复（hash 距离=0）图片数量
-print(summary.similar.count);        // 相似但非完全重复的图片数量
-print(summary.blur.count);           // 模糊图片数量
-print(summary.other.count);          // 未命中上述任一标签的剩余
-
-for (final g in summary.groups) {
-  // 每个 g 是一个相似/重复分组 (size>1)
-  print('group: '+ g.map((e)=>e.entry.name).join(', '));
+## CleanInfo 实时分类
+流式分析时除了单张图片的 `ImageAnalyzedEvent`，还会紧跟一个 `CleanInfoUpdatedEvent`，内部 `cleanInfo` 的结构示例：
+```json
+{
+  "all": {"count": 5, "size": 123456, "list": ["a","b","c","d","e"]},
+  "duplicate": {"count": 2, "size": 23456, "list": ["a","b"]},
+  "similar": {"count": 3, "size": 34567, "list": ["c","d","e"]},
+  "blur": {"count": 1, "size": 7890, "list": ["e"]},
+  "screenshot": {"count":0, "size":0, "list":[]},
+  "video": {"count":0, "size":0, "list":[]},
+  "other": {"count": 1, "size": 8888, "list": ["d"]}
 }
 ```
-
 说明：
-- 分类是“非互斥”的：同一图片既可能在 duplicate 也可能在 blur；`other` 是未出现在任意 duplicate/similar/blur 集合中的条目。
-- `groups` 仅包含 size>1 的聚类结果，用于 UI 展示。
-- 初始版本未包含 screenshot / video 分类（将来可扩展）。
+- duplicate/similar/blur 是“标签”概念，可重叠；`other` = 未命中前三种的剩余条目。
+- screenshot / video 为未来扩展占位当前恒为空。
+- duplicate 判定：同组内任何 pair 哈希汉明距离=0；similar：距离>0 且 ≤ 阈值；similar 会剔除已归入 duplicate 的名字。
+- 每满 `regroupEvery` 或最终结束时会重新聚类，随后再发一次更精确的 `CleanInfoUpdatedEvent`。
+简单消费方式：
+```dart
+await for (final ev in analyzeInMemoryStreaming(entries)) {
+  if (ev is CleanInfoUpdatedEvent) {
+    final info = ev.cleanInfo;
+    final dupCount = info['duplicate']['count'];
+    // 更新 UI ...
+  }
+}
+```
 
 ## 开发 / 贡献
 ```bash
