@@ -432,28 +432,11 @@ InMemoryStreamingAnalyzer createStreamingAnalyzer({
 /// Format: `b64:<base64Payload>`
 String encryptBytes(Uint8List data) => 'b64:${base64Encode(data)}';
 
-/// Convenience: encode an entry's bytes; throws if bytes were discarded.
-String encryptEntry(InMemoryImageEntry entry) {
-  final b = entry.bytes;
-  if (b == null) throw StateError('Entry bytes have been discarded; cannot encode.');
-  return encryptBytes(b);
-}
-
-/// Decode a token produced by [encryptBytes]/[encryptEntry].
+/// Decode a token produced by [encryptBytes].
 Uint8List decryptToBytes(String token) {
   if (!token.startsWith('b64:')) {
     throw FormatException('Unsupported token format');
   }
   final payload = token.substring(4);
   return Uint8List.fromList(base64Decode(payload));
-}
-
-/// Decode base64 token to new entry.
-InMemoryImageEntry decryptToEntry(
-  String token, {
-  required String name,
-  MediaType type = MediaType.image,
-}) {
-  final data = decryptToBytes(token);
-  return InMemoryImageEntry(name, data, type: type);
 }

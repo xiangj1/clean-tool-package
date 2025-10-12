@@ -13,9 +13,7 @@
 | 函数 | 说明 |
 | ---- | ---- |
 | `encryptBytes(bytes)` | 纯 base64 封装，返回 `b64:<payload>`，不做加密。 |
-| `encryptEntry(entry)` | 对条目当前字节做 base64 封装（若 bytes 已释放会抛出）。 |
 | `decryptToBytes(token)` | 解析 `b64:` 前缀并还原原始字节。 |
-| `decryptToEntry(token, name: ..., type?: MediaType)` | 还原为新条目。 |
 
 注意：仅作简单传输/存储包装，不具备安全性；需要机密性请使用真正的加密算法库。
 
@@ -318,7 +316,7 @@ dart test
 ```
 
 ## 版本
-当前 `pubspec.yaml` 版本：0.2.0 （新增动态推送与可选字节释放破坏性更新）。
+当前 `pubspec.yaml` 版本：0.2.2 （进一步简化：仅保留 bytes base64 编码 API）。
 
 ## License
 MIT

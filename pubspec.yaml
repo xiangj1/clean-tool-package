@@ -1,6 +1,6 @@
 name: photo_clean_core
 description: "Minimal core: perceptual hash + blur + streaming duplicate detection."
-version: 0.2.1
+version: 0.2.2
 repository: https://github.com/xiangj1/clean-tool-package
 environment:
   sdk: '>=3.5.0 <4.0.0'
