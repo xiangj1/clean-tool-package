@@ -40,13 +40,7 @@ class CleanInfoUpdatedEvent extends StreamingAnalysisEvent {
 /// (e.g. > several thousand images). You push entries one-by-one (or in small batches) via
 /// [add] / [addAll]; when the internal processed count reaches each multiple of [regroupEvery]
 /// a classification snapshot is emitted on [stream]. Call [close] after the final add to emit
-/// a last snapshot if the last batch was incomplete.
-///
-/// NOTE: Current implementation still retains the original `InMemoryImageEntry` objects so their
-/// byte buffers remain in memory until close. This already lets caller avoid building a giant list
-/// at once, but peak memory can still grow toward the cumulative size of all images. A future
-/// optimization would be to discard image bytes after extracting hash / blur metadata (would
-/// require changing `InMemoryImageEntry` or introducing a lightweight internal metadata holder).
+/// a last snapshot if the last batch was incomplete
 class InMemoryStreamingAnalyzer {
   final int phashThreshold;
   final double blurThreshold;
