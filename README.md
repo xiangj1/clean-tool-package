@@ -10,6 +10,100 @@
 事件类型只有一种：
 - `CleanInfoUpdatedEvent`：每达到 `regroupEvery` 数量或结束时输出聚合分类 Map（all / duplicate / similar / blur / screenshot / video / other）。
 
+可选媒体类型：构造 `InMemoryImageEntry` 时指定 `type: MediaType.screenshot` 或 `MediaType.video`，分类会自动进入对应分组；未指定默认为 `image` 不占用 screenshot / video 名额。
+
+## 构建 InMemoryImageEntry（Host 侧集成指引）
+库本身不读取文件系统，也不做“这是不是截图/视频”的推断——完全由调用方注入。建议：
+
+1. 统一抽象：在你的采集层产出 `List<InMemoryImageEntry>`（或增量 append），然后交给 `analyzeInMemoryStreaming`。
+2. 媒体类型判定策略（示例，可按需替换）：
+   - Screenshot：文件名含 `Screenshot` / `屏幕截图` / `WeChat_Screenshot` / 典型前缀；或长宽比接近屏幕分辨率；或来自系统截图目录。
+   - Video（封面帧）：扩展名在 `['.mp4', '.mov', '.mkv', '.avi']`，先用你自己的逻辑截取首帧/中帧，再把该帧的二进制作为 `bytes`，并标记 `MediaType.video`。
+   - 普通图片：其余全部 `MediaType.image`（默认值，可不显式给）。
+3. 大量文件处理：自行分页（例如 1k 一页）构建并依次传给流式接口；或预先过滤（尺寸 / 最小字节数 / 扩展名白名单）。
+
+### 示例：从文件路径批量构建
+```dart
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:photo_clean_core/photo_clean_core.dart';
+
+final _screenshotNameHints = [
+  'screenshot', '屏幕截图', 'screen_shot', '截屏'
+];
+final _videoExt = {'.mp4', '.mov', '.mkv', '.avi'};
+
+MediaType _inferType(File f) {
+  final nameLower = f.path.toLowerCase();
+  if (_videoExt.any((e) => nameLower.endsWith(e))) return MediaType.video;
+  if (_screenshotNameHints.any((h) => nameLower.contains(h))) return MediaType.screenshot;
+  return MediaType.image;
+}
+
+Future<List<InMemoryImageEntry>> buildEntries(Iterable<File> files) async {
+  final list = <InMemoryImageEntry>[];
+  for (final f in files) {
+    try {
+      final bytes = await f.readAsBytes();
+      if (bytes.isEmpty) continue; // 跳过空文件
+      list.add(
+        InMemoryImageEntry(
+          f.uri.pathSegments.isNotEmpty ? f.uri.pathSegments.last : f.path,
+          Uint8List.fromList(bytes),
+          type: _inferType(f),
+        ),
+      );
+    } catch (_) {
+      // 读取失败静默忽略（可在此计数或打印日志）
+    }
+  }
+  return list;
+}
+
+Future<void> runClean(Iterable<File> files) async {
+  final entries = await buildEntries(files);
+  await for (final ev in analyzeInMemoryStreaming(entries,
+      phashThreshold: 8, blurThreshold: 250, regroupEvery: 80)) {
+    final info = (ev as CleanInfoUpdatedEvent).cleanInfo;
+    print('dup=${info['duplicate']['count']} screenshot=${info['screenshot']['count']} video=${info['video']['count']}');
+  }
+}
+```
+
+### 示例：处理视频生成封面帧
+如果你需要把视频纳入“相似 / 重复”判断，可自行提前抽帧：
+```dart
+// 伪代码：使用你偏好的视频处理库 (ffmpeg/flutter_ffmpeg 等)
+Uint8List extractMiddleFrameBytes(String videoPath) {
+  // 1. 读取总时长
+  // 2. 抽取中点帧到内存
+  // 3. 返回其 PNG/JPEG 编码字节
+  return Uint8List(0);
+}
+
+InMemoryImageEntry toVideoEntry(String videoPath) {
+  final frameBytes = extractMiddleFrameBytes(videoPath);
+  return InMemoryImageEntry(
+    videoPath.split('/').last,
+    frameBytes,
+    type: MediaType.video,
+  );
+}
+```
+
+注意：视频抽帧质量/时间点会影响感知哈希结果；若需要更稳健的相似度，可抽多帧做 hash 取中位数或最小距离（可在上层实现后再只传一条代表帧进入本库）。
+
+### 何时更新条目列表
+`analyzeInMemoryStreaming` 当前设计为一次性输入（不可动态 push）。要做增量：
+1. 先缓存历史条目的 (hash, blurVar)（需要 fork 暴露或在外部再计算）
+2. 新增文件只与新增 + 历史做 pairwise（你可自行替换为更高效结构）
+3. 之后再把完整列表重新跑一次或只跑新增集合并合并结果（此库暂不直接支持增量 API）。
+
+### 最小 vs. 完整字节
+建议直接存放压缩格式原始 bytes（JPEG/PNG）即可；库内部会自行 decode & resize (32x32) 做哈希，不需要你先行缩放。
+
+---
+
 ## 安装
 在你的 `pubspec.yaml`：
 ```yaml
@@ -140,8 +234,8 @@ class _DuplicateScanPageState extends State<DuplicateScanPage> {
 }
 ```
 说明：
-- duplicate/similar/blur 是“标签”概念，可重叠；`other` = 未命中前三种的剩余条目。
-- screenshot / video 为未来扩展占位当前恒为空。
+- duplicate/similar/blur 是“标签”概念，可重叠；`other` = 未命中这些标签与显式媒体类型的剩余条目。
+- screenshot / video：由调用方在 `InMemoryImageEntry` 中的 `type` 显式标记得到。
 - duplicate：同组内任意 pair 哈希距离=0
 - similar：距离>0 且 ≤ 阈值（剔除已标记 duplicate 的条目）
 - 每满 `regroupEvery` 或结束时重新聚合与分类

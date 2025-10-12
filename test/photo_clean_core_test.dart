@@ -15,14 +15,14 @@ void main() {
 		return im;
 	}
 
-	test('stream final cleanInfo categories contain expected duplicate', () async {
+	test('stream final cleanInfo categories contain expected duplicate & media types', () async {
 		final a = pattern(7);
 		final b = img.copyRotate(a, angle: 0); // identical content
 		final c = pattern(11);
 		final entries = [
-			InMemoryImageEntry('a', Uint8List.fromList(img.encodePng(a))),
+			InMemoryImageEntry('a', Uint8List.fromList(img.encodePng(a)), type: MediaType.screenshot),
 			InMemoryImageEntry('b', Uint8List.fromList(img.encodePng(b))),
-			InMemoryImageEntry('c', Uint8List.fromList(img.encodePng(c))),
+			InMemoryImageEntry('c', Uint8List.fromList(img.encodePng(c)), type: MediaType.video),
 		];
 
 		CleanInfoUpdatedEvent? last;
@@ -37,5 +37,10 @@ void main() {
 		}
 		final dupList = (info['duplicate']['list'] as List).cast<String>();
 		expect(dupList.contains('a') && dupList.contains('b'), isTrue, reason: 'a & b should be duplicate');
+		// media type classification
+		final screenshotList = (info['screenshot']['list'] as List).cast<String>();
+		final videoList = (info['video']['list'] as List).cast<String>();
+		expect(screenshotList, contains('a'));
+		expect(videoList, contains('c'));
 	});
 }
