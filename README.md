@@ -9,6 +9,16 @@
 1. 一次性列表：`analyzeInMemoryStreaming(entries, phashThreshold: 10, blurThreshold: 250, regroupEvery: 50, discardBytesAfterProcessing: true)`
 2. 动态推送：`createStreamingAnalyzer(phashThreshold: ..., blurThreshold: ..., regroupEvery: ..., discardBytesAfterProcessing: true)` 获取 `InMemoryStreamingAnalyzer`，逐个 `add`，最后 `close`。
 
+### 额外编码（非严格加密）API
+| 函数 | 说明 |
+| ---- | ---- |
+| `encryptBytes(bytes, xorKey?: String)` | Base64 + 可选 XOR 混淆，输出 `v1:<hexKey>:<b64>` 字符串（非强加密）。 |
+| `encryptEntry(entry, xorKey?: String)` | 对 `InMemoryImageEntry` 内容做同样混淆，若其 bytes 已被释放会抛出。 |
+| `decryptToBytes(token, xorKey?: String)` | 解析并还原字节；需要与加密时一致的 key（若当时提供）。 |
+| `decryptToEntry(token, name: ..., type?: MediaType, xorKey?: String)` | 直接还原为新的条目。 |
+
+安全注意：仅用于简单 obfuscation（防止直观查看），不是密码学安全；严肃安全请用真正的加密库。
+
 事件类型只有一种：
 - `CleanInfoUpdatedEvent`：每达到 `regroupEvery` 数量或结束时输出聚合分类 Map（all / duplicate / similar / blur / screenshot / video / other）。
 
