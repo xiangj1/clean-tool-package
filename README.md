@@ -17,6 +17,84 @@
 
 注意：仅作简单传输/存储包装，不具备安全性；需要机密性请使用真正的加密算法库。
 
+#### 示例：图片 / 视频 -> bytes -> encryptBytes -> decryptToBytes -> UI 展示
+
+下面给出在 Flutter 中分别处理图片与视频的最小示例（假定使用 `image_picker` 与常见视频缩略图方案）。
+
+```dart
+import 'dart:typed_data';
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:photo_clean_core/photo_clean_core.dart';
+
+class EncodeDecodeDemo extends StatefulWidget {
+  const EncodeDecodeDemo({super.key});
+  @override State<EncodeDecodeDemo> createState() => _EncodeDecodeDemoState();
+}
+
+class _EncodeDecodeDemoState extends State<EncodeDecodeDemo> {
+  Uint8List? _originalImageBytes;
+  Uint8List? _decodedImageBytes;
+  String? _token;
+
+  Future<void> pickAndEncodeImage() async {
+    final picker = ImagePicker();
+    final imgFile = await picker.pickImage(source: ImageSource.gallery);
+    if (imgFile == null) return;
+    final bytes = await imgFile.readAsBytes(); // 原始 JPEG/PNG 字节
+    final t = encryptBytes(bytes);              // => b64:...
+    final restored = decryptToBytes(t);         // 还原
+    setState(() {
+      _originalImageBytes = bytes;
+      _decodedImageBytes = restored;
+      _token = t;
+    });
+  }
+
+  // 视频：通常需要生成缩略图或直接对文件字节编码；这里演示“整体文件”方式（注意大视频会非常大，不建议这样做）。
+  Future<void> pickAndEncodeVideo() async {
+    final picker = ImagePicker();
+    final video = await picker.pickVideo(source: ImageSource.gallery);
+    if (video == null) return;
+    final bytes = await video.readAsBytes();
+    // 警告：整段视频 base64 会放大约 33% 体积，请按需截取关键帧或只传缩略图。
+    final t = encryptBytes(bytes);
+    final restored = decryptToBytes(t);
+    // 写回一个临时文件用于播放器展示（可选）
+    final tmpPath = '${(await Directory.systemTemp.createTemp()).path}/restored_${video.name}';
+    final f = File(tmpPath)..writeAsBytesSync(restored, flush: true);
+    debugPrint('Restored video file at: $tmpPath size=${restored.length}');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Encode / Decode Demo')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          ElevatedButton(onPressed: pickAndEncodeImage, child: const Text('Pick Image & Roundtrip')),
+          ElevatedButton(onPressed: pickAndEncodeVideo, child: const Text('Pick Video & Roundtrip (not memory friendly)')),
+          if (_token != null) Text('Token(head): ${_token!.substring(0, 40)}...'),
+          const SizedBox(height: 12),
+          if (_originalImageBytes != null) Text('Original bytes: ${_originalImageBytes!.length}'),
+          if (_decodedImageBytes != null) Text('Decoded bytes: ${_decodedImageBytes!.length}'),
+          const SizedBox(height: 12),
+          if (_originalImageBytes != null) Image.memory(_originalImageBytes!, height: 120, fit: BoxFit.cover),
+          if (_decodedImageBytes != null) Image.memory(_decodedImageBytes!, height: 120, fit: BoxFit.cover),
+        ],
+      ),
+    );
+  }
+}
+```
+
+要点：
+- `encryptBytes` 不解码图片，不损失质量，只是 base64 包装；`decryptToBytes` 完全还原。
+- 视频一般不要整段 base64（内存与体积巨大）——建议只抽帧或用流式分块（后续若需要可再扩展）。
+
+
 事件类型只有一种：
 - `CleanInfoUpdatedEvent`：每达到 `regroupEvery` 数量或结束时输出聚合分类 Map（all / duplicate / similar / blur / screenshot / video / other）。
 
