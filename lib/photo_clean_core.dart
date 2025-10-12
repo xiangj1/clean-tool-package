@@ -2,6 +2,7 @@ library photo_clean_core;
 
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:async';
 import 'package:image/image.dart' as img;
 
 /// Simple in-memory image holder (name + raw bytes).
@@ -9,10 +10,16 @@ enum MediaType { image, screenshot, video }
 
 class InMemoryImageEntry {
   final String name;
-  final Uint8List bytes;
+  Uint8List? bytes; // may be nulled after processing to release memory
+  final int originalSize;
   final MediaType type;
 
-  const InMemoryImageEntry(this.name, this.bytes, {this.type = MediaType.image});
+  InMemoryImageEntry(this.name, Uint8List bytes, {this.type = MediaType.image})
+      : bytes = bytes,
+        originalSize = bytes.length;
+
+  int get size => bytes?.length ?? originalSize;
+  bool get isBytesDiscarded => bytes == null;
 }
 
 /// Base event type (kept for future extensibility: progress/error, etc.).
@@ -25,6 +32,96 @@ class CleanInfoUpdatedEvent extends StreamingAnalysisEvent {
   final Map<String, dynamic> cleanInfo;
 
   const CleanInfoUpdatedEvent(this.cleanInfo);
+}
+
+/// Incremental (dynamic push) analyzer.
+///
+/// Use when you cannot or do not want to allocate a giant `List<InMemoryImageEntry>` up-front
+/// (e.g. > several thousand images). You push entries one-by-one (or in small batches) via
+/// [add] / [addAll]; when the internal processed count reaches each multiple of [regroupEvery]
+/// a classification snapshot is emitted on [stream]. Call [close] after the final add to emit
+/// a last snapshot if the last batch was incomplete.
+///
+/// NOTE: Current implementation still retains the original `InMemoryImageEntry` objects so their
+/// byte buffers remain in memory until close. This already lets caller avoid building a giant list
+/// at once, but peak memory can still grow toward the cumulative size of all images. A future
+/// optimization would be to discard image bytes after extracting hash / blur metadata (would
+/// require changing `InMemoryImageEntry` or introducing a lightweight internal metadata holder).
+class InMemoryStreamingAnalyzer {
+  final int phashThreshold;
+  final double blurThreshold;
+  final int regroupEvery;
+  final bool discardBytesAfterProcessing;
+
+  final _hashes = <BigInt>[];
+  final _entries = <InMemoryImageEntry>[];
+  final _blurFlags = <bool>[];
+  final _controller = StreamController<StreamingAnalysisEvent>.broadcast();
+  bool _closed = false;
+  Future<void> _chain = Future.value();
+
+  InMemoryStreamingAnalyzer({
+    this.phashThreshold = 10,
+    this.blurThreshold = 250.0,
+    int regroupEvery = 50,
+    this.discardBytesAfterProcessing = true,
+  }) : regroupEvery = regroupEvery < 1 ? 1 : regroupEvery;
+
+  Stream<StreamingAnalysisEvent> get stream => _controller.stream;
+
+  /// Add a single entry (queued sequentially). Returns when processing completed and a snapshot
+  /// may have been emitted.
+  Future<void> add(InMemoryImageEntry entry) {
+    if (_closed) return Future.value();
+  _chain = _chain.then((_) async {
+      try {
+  final data = entry.bytes; // if already discarded (shouldn't happen), skip
+  if (data == null) return;
+  final decoded = img.decodeImage(data);
+        if (decoded == null) return;
+        final norm = img.copyResize(
+          decoded,
+          width: 256,
+          height: 256,
+          interpolation: img.Interpolation.linear,
+        );
+        _hashes.add(_pHash64(norm));
+        _blurFlags.add(_laplacianVariance(norm) < blurThreshold);
+        _entries.add(entry);
+        if (discardBytesAfterProcessing) {
+          entry.bytes = null; // free reference
+        }
+        if (_entries.length % regroupEvery == 0) {
+          _controller.add(CleanInfoUpdatedEvent(
+            _buildSnapshot(_hashes, _entries, _blurFlags, phashThreshold),
+          ));
+        }
+      } catch (_) {
+        // swallow individual decode errors
+      }
+    });
+    return _chain;
+  }
+
+  /// Add multiple entries in order.
+  Future<void> addAll(Iterable<InMemoryImageEntry> list) async {
+    for (final e in list) {
+      await add(e); // preserve order & batching semantics
+    }
+  }
+
+  /// Finish the stream and emit a final snapshot if the last batch wasn't a full multiple.
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    await _chain; // ensure all queued work done
+    if (_entries.isNotEmpty && _entries.length % regroupEvery != 0) {
+      _controller.add(CleanInfoUpdatedEvent(
+        _buildSnapshot(_hashes, _entries, _blurFlags, phashThreshold),
+      ));
+    }
+    await _controller.close();
+  }
 }
 
 // ---- Internal algorithms (now private) ----
@@ -115,6 +212,7 @@ Stream<StreamingAnalysisEvent> analyzeInMemoryStreaming(
   int phashThreshold = 10,
   double blurThreshold = 250.0,
   int regroupEvery = 50,
+  bool discardBytesAfterProcessing = true,
 }) async* {
   if (entries.isEmpty) return;
   if (regroupEvery < 1) regroupEvery = 1;
@@ -123,7 +221,9 @@ Stream<StreamingAnalysisEvent> analyzeInMemoryStreaming(
   final blurFlags = <bool>[];
   for (final e in entries) {
     try {
-      final decoded = img.decodeImage(e.bytes);
+  final data = e.bytes;
+  if (data == null) continue; // already discarded somehow
+  final decoded = img.decodeImage(data);
       if (decoded == null) continue;
       final norm = img.copyResize(
         decoded,
@@ -134,6 +234,9 @@ Stream<StreamingAnalysisEvent> analyzeInMemoryStreaming(
       hashes.add(_pHash64(norm));
       blurFlags.add(_laplacianVariance(norm) < blurThreshold);
       processed.add(e);
+      if (discardBytesAfterProcessing) {
+        e.bytes = null;
+      }
       if (processed.length % regroupEvery == 0) {
         yield CleanInfoUpdatedEvent(
           _buildSnapshot(hashes, processed, blurFlags, phashThreshold),
@@ -199,13 +302,13 @@ Map<String, dynamic> _buildSnapshot(
     }
   }
 
-  final totalSize = entries.fold<int>(0, (p, e) => p + e.bytes.length);
+  final totalSize = entries.fold<int>(0, (p, e) => p + e.size);
 
   Map<String, dynamic> pack(Set<String> names) {
     final list = entries.where((e) => names.contains(e.name)).toList();
     return {
       'count': list.length,
-      'size': list.fold<int>(0, (p, e) => p + e.bytes.length),
+      'size': list.fold<int>(0, (p, e) => p + e.size),
       'list': list.map((e) => e.name).toList(),
     };
   }
@@ -315,3 +418,14 @@ double _median(List<double> v) {
   if (v.length.isOdd) return v[m];
   return (v[m - 1] + v[m]) / 2.0;
 }
+
+/// Convenience factory to create a dynamic analyzer.
+InMemoryStreamingAnalyzer createStreamingAnalyzer({
+  int phashThreshold = 10,
+  double blurThreshold = 250.0,
+  int regroupEvery = 50,
+}) => InMemoryStreamingAnalyzer(
+      phashThreshold: phashThreshold,
+      blurThreshold: blurThreshold,
+      regroupEvery: regroupEvery,
+    );

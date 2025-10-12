@@ -4,8 +4,10 @@
 
 > 该仓库已扁平化；历史中的 CLI、压缩、加密、目录 JSON 输出、辅助脚本等均已移除，只保留最小必要算法与流式事件接口。
 
-## 公共 API（只有一个）
-`analyzeInMemoryStreaming(entries, phashThreshold: 10, blurThreshold: 250, regroupEvery: 50)`
+## 公共 API
+
+1. 一次性列表：`analyzeInMemoryStreaming(entries, phashThreshold: 10, blurThreshold: 250, regroupEvery: 50, discardBytesAfterProcessing: true)`
+2. 动态推送：`createStreamingAnalyzer(phashThreshold: ..., blurThreshold: ..., regroupEvery: ..., discardBytesAfterProcessing: true)` 获取 `InMemoryStreamingAnalyzer`，逐个 `add`，最后 `close`。
 
 事件类型只有一种：
 - `CleanInfoUpdatedEvent`：每达到 `regroupEvery` 数量或结束时输出聚合分类 Map（all / duplicate / similar / blur / screenshot / video / other）。
@@ -93,11 +95,58 @@ InMemoryImageEntry toVideoEntry(String videoPath) {
 
 注意：视频抽帧质量/时间点会影响感知哈希结果；若需要更稳健的相似度，可抽多帧做 hash 取中位数或最小距离（可在上层实现后再只传一条代表帧进入本库）。
 
-### 何时更新条目列表
-`analyzeInMemoryStreaming` 当前设计为一次性输入（不可动态 push）。要做增量：
-1. 先缓存历史条目的 (hash, blurVar)（需要 fork 暴露或在外部再计算）
-2. 新增文件只与新增 + 历史做 pairwise（你可自行替换为更高效结构）
-3. 之后再把完整列表重新跑一次或只跑新增集合并合并结果（此库暂不直接支持增量 API）。
+### 动态推送增量模式
+通过 `createStreamingAnalyzer`：
+```dart
+final analyzer = createStreamingAnalyzer(phashThreshold: 8, regroupEvery: 100);
+
+// 监听输出事件
+analyzer.stream.listen((ev) {
+  final info = (ev as CleanInfoUpdatedEvent).cleanInfo;
+  print('[batch] total=${info['all']['count']} dup=${info['duplicate']['count']}');
+});
+
+// 分批读取 / 扫描目录 / 网络分页
+for (final file in someHugeFileListChunked) {
+  final bytes = await file.readAsBytes();
+  await analyzer.add(
+    InMemoryImageEntry(file.path.split('/').last, bytes,
+        type: file.path.contains('Screenshot') ? MediaType.screenshot : MediaType.image),
+  );
+}
+
+await analyzer.close(); // 触发尾批次
+```
+特点：
+- 避免一次性构造巨大 `List`；边发现边处理。
+- 通过 `discardBytesAfterProcessing`（默认 true）在 hash / blur 计算后将条目 `bytes` 置空，仅保留名称/原始大小/类型，显著降低峰值内存。
+- 如需后续仍访问原始字节（例如展示预览）可将该参数设为 false，自行管理缓存。
+
+#### 10k 张图片内存问题？
+是否会“崩溃”取决于单张压缩大小：
+- 平均 300KB * 10k ≈ 3GB（移动端肯定不行，桌面也偏高）。
+- 平均 100KB * 10k ≈ 1GB。
+
+当前实现内存构成：
+1. 原始压缩 bytes 总和（主因）。
+2. 临时解码 256x256 图像对象（逐张，用完即丢，峰值 ~256*256*4≈256KB/图）。
+3. 哈希 / 模糊标记数组（O(n) 级别，对 10k 量级只有几十 KB）。
+
+缓解策略：
+| 级别 | 手段 | 预期影响 |
+| ---- | ---- | -------- |
+| 必做 | 预过滤（尺寸<阈值、扩展名白名单、重复文件大小 + hash 快速跳过） | 直接减少入口 n |
+| 推荐 | 分页 + 动态推送 + 中途用户可取消 | 降低等待感 |
+| 进阶 | Fork 后改成：计算完 hash/blur 即把 `bytes` 置空 (或仅保留长度) | 大幅降低峰值 |
+| 进阶 | 使用外部缓存 (hash, blurVar) + 持久化，增量只对新增做 O(k*n) | 扫描加速 & 降内存 |
+| 高阶 | 改聚类为近似索引（LSH / BK-tree） | 降 O(n²) 开销，支撑更大规模 |
+
+已内置自动释放：默认 `discardBytesAfterProcessing = true`。若关闭该特性，可自建 LRU / 文件映射缓存保存原始 bytes。
+
+#### 增量 / 追加扫描方案
+1. 首次全量：动态推送完 → 缓存 (name -> hash, blurVar, size, type)。
+2. 新增文件：只对“新增集合 × (历史+新增)”做距离计算；把结果合并至聚类结构。
+3. 需要官方支持可提出 issue；当前核心保持极简不内置索引结构。
 
 ### 最小 vs. 完整字节
 建议直接存放压缩格式原始 bytes（JPEG/PNG）即可；库内部会自行 decode & resize (32x32) 做哈希，不需要你先行缩放。
@@ -161,7 +210,10 @@ class _DuplicateScanPageState extends State<DuplicateScanPage> {
     _entries.clear();
     for (final f in files) {
       final bytes = await f.readAsBytes();
-      _entries.add(InMemoryImageEntry(f.name, Uint8List.fromList(bytes)));
+      final type = f.name.toLowerCase().contains('screenshot')
+          ? MediaType.screenshot
+          : MediaType.image; // 简单示例：按文件名判断
+      _entries.add(InMemoryImageEntry(f.name, Uint8List.fromList(bytes), type: type));
     }
   setState(() { _running = true; _lastInfo = null; });
 
@@ -204,7 +256,7 @@ class _DuplicateScanPageState extends State<DuplicateScanPage> {
 
 要点：
 - 目前只提供内存级 API，文件扫描/缓存策略由上层自行实现。
-- 大批量 (> 数千) 建议自行分批/隔离 (isolate) 以避免主线程卡顿。
+- 大批量 (> 数千) 建议：动态推送 + 预过滤；必要时 isolate 计算。
 
 ## 性能 & 调参建议
 | 场景 | 建议 |
@@ -256,7 +308,7 @@ dart test
 ```
 
 ## 版本
-当前 `pubspec.yaml` 版本：0.1.0 （首次极简化版本）。若后续继续产生破坏性改动，建议升级至 0.2.0+ 并维护 CHANGELOG。
+当前 `pubspec.yaml` 版本：0.2.0 （新增动态推送与可选字节释放破坏性更新）。
 
 ## License
 MIT
