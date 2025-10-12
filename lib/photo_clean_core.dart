@@ -428,92 +428,32 @@ InMemoryStreamingAnalyzer createStreamingAnalyzer({
 // ---------------------------------------------------------------------------
 // Simple (non-cryptographic) encode / decode helpers
 // ---------------------------------------------------------------------------
-/// Encrypt (actually: obfuscate + base64) raw bytes or an [InMemoryImageEntry].
-///
-/// This is NOT secure strong encryption—it's only base64 + optional XOR mask to avoid
-/// plain storage. For real security use a proven crypto library (e.g. PointyCastle).
-///
-/// Returns a string with format: `v1:<hexKeyUsed>:<base64Payload>` where hexKeyUsed is
-/// the (possibly truncated) XOR key bytes in hex (empty if no key supplied).
-String encryptBytes(
-  Uint8List data, {
-  String? xorKey,
-}) {
-  final keyBytes = xorKey == null || xorKey.isEmpty
-      ? null
-      : utf8.encode(xorKey); // simple utf8 key
-  Uint8List payload;
-  if (keyBytes == null) {
-    payload = data;
-  } else {
-    final out = Uint8List(data.length);
-    for (var i = 0; i < data.length; i++) {
-      out[i] = data[i] ^ keyBytes[i % keyBytes.length];
-    }
-    payload = out;
-  }
-  final b64 = base64Encode(payload);
-  final keyHex = keyBytes == null
-      ? ''
-      : keyBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  return 'v1:$keyHex:$b64';
+/// Encode raw bytes (image / video) into a simple base64 token. Not secure encryption.
+/// Format: `b64:<base64Payload>`
+String encryptBytes(Uint8List data) => 'b64:${base64Encode(data)}';
+
+/// Convenience: encode an entry's bytes; throws if bytes were discarded.
+String encryptEntry(InMemoryImageEntry entry) {
+  final b = entry.bytes;
+  if (b == null) throw StateError('Entry bytes have been discarded; cannot encode.');
+  return encryptBytes(b);
 }
 
-/// Convenience: encrypt an [InMemoryImageEntry]. If [entry.bytes] was discarded the
-/// call throws.
-String encryptEntry(InMemoryImageEntry entry, {String? xorKey}) {
-  final data = entry.bytes;
-  if (data == null) {
-    throw StateError('Entry bytes have been discarded; cannot encrypt.');
+/// Decode a token produced by [encryptBytes]/[encryptEntry].
+Uint8List decryptToBytes(String token) {
+  if (!token.startsWith('b64:')) {
+    throw FormatException('Unsupported token format');
   }
-  return encryptBytes(data, xorKey: xorKey);
+  final payload = token.substring(4);
+  return Uint8List.fromList(base64Decode(payload));
 }
 
-/// Decrypt previously encoded string from [encryptBytes]/[encryptEntry].
-/// Auto-detects version prefix. Throws [FormatException] if malformed.
-Uint8List decryptToBytes(String token, {String? xorKey}) {
-  if (!token.startsWith('v1:')) {
-    throw FormatException('Unsupported token version');
-  }
-  final parts = token.split(':');
-  if (parts.length != 3) {
-    throw FormatException('Malformed token');
-  }
-  final keyHex = parts[1];
-  final payloadB64 = parts[2];
-  final bytes = base64Decode(payloadB64);
-  final keyProvided = xorKey != null && xorKey.isNotEmpty;
-  if (keyHex.isEmpty) {
-    if (keyProvided) {
-      // user gave key but original had none; ignore key
-    }
-    return Uint8List.fromList(bytes);
-  }
-  if (!keyProvided) {
-    throw FormatException('Token requires xorKey but none provided');
-  }
-  final expectedKeyHex = utf8
-    .encode(xorKey)
-      .map((b) => b.toRadixString(16).padLeft(2, '0'))
-      .join();
-  if (expectedKeyHex != keyHex) {
-    throw FormatException('xorKey mismatch');
-  }
-  final out = Uint8List(bytes.length);
-  final keyBytes = utf8.encode(xorKey);
-  for (var i = 0; i < bytes.length; i++) {
-    out[i] = bytes[i] ^ keyBytes[i % keyBytes.length];
-  }
-  return out;
-}
-
-/// Decrypt and wrap as an [InMemoryImageEntry]. Caller provides a name & optional media type.
+/// Decode base64 token to new entry.
 InMemoryImageEntry decryptToEntry(
   String token, {
   required String name,
   MediaType type = MediaType.image,
-  String? xorKey,
 }) {
-  final data = decryptToBytes(token, xorKey: xorKey);
+  final data = decryptToBytes(token);
   return InMemoryImageEntry(name, data, type: type);
 }

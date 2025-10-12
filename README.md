@@ -12,12 +12,12 @@
 ### 额外编码（非严格加密）API
 | 函数 | 说明 |
 | ---- | ---- |
-| `encryptBytes(bytes, xorKey?: String)` | Base64 + 可选 XOR 混淆，输出 `v1:<hexKey>:<b64>` 字符串（非强加密）。 |
-| `encryptEntry(entry, xorKey?: String)` | 对 `InMemoryImageEntry` 内容做同样混淆，若其 bytes 已被释放会抛出。 |
-| `decryptToBytes(token, xorKey?: String)` | 解析并还原字节；需要与加密时一致的 key（若当时提供）。 |
-| `decryptToEntry(token, name: ..., type?: MediaType, xorKey?: String)` | 直接还原为新的条目。 |
+| `encryptBytes(bytes)` | 纯 base64 封装，返回 `b64:<payload>`，不做加密。 |
+| `encryptEntry(entry)` | 对条目当前字节做 base64 封装（若 bytes 已释放会抛出）。 |
+| `decryptToBytes(token)` | 解析 `b64:` 前缀并还原原始字节。 |
+| `decryptToEntry(token, name: ..., type?: MediaType)` | 还原为新条目。 |
 
-安全注意：仅用于简单 obfuscation（防止直观查看），不是密码学安全；严肃安全请用真正的加密库。
+注意：仅作简单传输/存储包装，不具备安全性；需要机密性请使用真正的加密算法库。
 
 事件类型只有一种：
 - `CleanInfoUpdatedEvent`：每达到 `regroupEvery` 数量或结束时输出聚合分类 Map（all / duplicate / similar / blur / screenshot / video / other）。
