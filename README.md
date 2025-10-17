@@ -94,6 +94,64 @@ class _EncodeDecodeDemoState extends State<EncodeDecodeDemo> {
 - `encryptBytes` 不解码图片，不损失质量，只是 base64 包装；`decryptToBytes` 完全还原。
 - 视频一般不要整段 base64（内存与体积巨大）——建议只抽帧或用流式分块（后续若需要可再扩展）。
 
+### 简易图片压缩 `compressImage`
+
+库内提供一个极简 JPEG 重新编码函数：
+
+```dart
+Uint8List compressImage(img.Image image, {int quality = 85});
+```
+
+特点：
+- 仅做一次 `encodeJpg`，不做尺寸缩放、不做目标大小搜索。
+- 传入的是已经解码好的 `img.Image`，避免库内部再次解码原始字节。
+- 返回即为 JPEG 压缩后的字节（`Uint8List`）。
+
+#### 最小示例：从文件读取 -> 解码 -> 压缩 -> 再次解码
+
+```dart
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:image/image.dart' as img;
+import 'package:photo_clean_core/photo_clean_core.dart';
+
+Future<void> compressDemo() async {
+  // 1. 读取原始图片字节
+  final originalBytes = await File('input.jpg').readAsBytes();
+
+  // 2. 解码为 img.Image（只做一次）
+  final decoded = img.decodeImage(originalBytes);
+  if (decoded == null) {
+    throw Exception('Decode failed');
+  }
+
+  // 3. 压缩（quality 1~100，越大越不压缩）
+  final compressedBytes = compressImage(decoded, quality: 80);
+  print('Original=${originalBytes.length}  Compressed=${compressedBytes.length}');
+
+  // 4. 需要再次进行像素层处理 / 预览，可再解码一次
+  final decodedAgain = img.decodeImage(compressedBytes)!;
+  print('DecodedAgain size: ${decodedAgain.width}x${decodedAgain.height}');
+
+  // 5. 写出结果（可直接上传/存储）
+  await File('output_compressed.jpg').writeAsBytes(compressedBytes, flush: true);
+}
+```
+
+在 Flutter 中如果只是要展示，可以直接：
+
+```dart
+Image.memory(compressedBytes);
+```
+
+如果你本来只有字节（例如 `pickedFile.readAsBytes()`），原来做法：
+1. `decodeImage(bytes)` 得到 `img.Image`
+2. `compressImage(decoded)` 直接压缩
+
+这样避免了“函数内部再 decode 一次”的冗余。
+
+后续若需要：目标大小逼近 / 降采样 / WebP 可在上层自行扩展或提交 issue；当前保持极简。
+
 
 事件类型只有一种：
 - `CleanInfoUpdatedEvent`：每达到 `regroupEvery` 数量或结束时输出聚合分类 Map（all / duplicate / similar / blur / screenshot / video / other）。

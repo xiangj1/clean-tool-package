@@ -440,3 +440,18 @@ Uint8List decryptToBytes(String token) {
   final payload = token.substring(4);
   return Uint8List.fromList(base64Decode(payload));
 }
+
+// ---------------------------------------------------------------------------
+// Minimal image compression helper (simple re-encode as JPEG)
+// ---------------------------------------------------------------------------
+/// Re-encode a decoded [img.Image] into JPEG.
+/// Thin wrapper over `img.encodeJpg` so callers可以避免重复 decode。
+Uint8List compressImage(
+  img.Image image, {
+  int quality = 85,
+}) {
+  return img.encodeJpg(
+        image,
+        quality: quality,
+      );
+}
